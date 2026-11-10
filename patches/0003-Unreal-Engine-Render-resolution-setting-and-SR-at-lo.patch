@@ -1,0 +1,463 @@
+From 63fd829d9f22476f07bb5717870fa2b7e3813db5 Mon Sep 17 00:00:00 2001
+From: Matteo Pacini <m+github@matteopacini.me>
+Date: Tue, 10 Nov 2026 23:04:47 +0000
+Subject: [PATCH 3/3] Unreal Engine: Render resolution setting, and SR at lower
+ render resolutions
+
+Add a "Render Resolution" setting with the FSR presets (Native AA, Quality,
+Balanced, Performance, Ultra Performance) and a custom value. It finds the
+storage of UE's "r.ScreenPercentage" and "r.TemporalAA.Upsampling" console
+variables in the game's executable, from the code UE generates for
+TAutoConsoleVariable and cached console variable lookups, and writes them
+every frame, so games that reset them from their own settings don't undo it.
+"Game Setting" restores the game's latest values.
+
+Below about 71%, UE renders views at sizes whose aspect ratio differs more
+from the output's (e.g. 1708x960 at 66.7% of 2560x1440), and its TAA jitter
+can exceed half a pixel, so the per-view constant buffer was rejected and SR
+never ran. Compare aspect ratios with a relative tolerance and accept jitters
+up to 2 pixels.
+
+Test builds log, once per reason, why a TAA pass wasn't replaced by SR, and
+which TAA shader candidates were rejected for having loops.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../includes/console_variables.hpp            | 115 +++++++++++
+ .../Unreal Engine/includes/shader_detect.hpp  |   3 +
+ Source/Games/Unreal Engine/main.cpp           | 179 +++++++++++++++++-
+ 3 files changed, 294 insertions(+), 3 deletions(-)
+ create mode 100644 Source/Games/Unreal Engine/includes/console_variables.hpp
+
+diff --git a/Source/Games/Unreal Engine/includes/console_variables.hpp b/Source/Games/Unreal Engine/includes/console_variables.hpp
+new file mode 100644
+index 00000000..1dcff8fa
+--- /dev/null
++++ b/Source/Games/Unreal Engine/includes/console_variables.hpp	
+@@ -0,0 +1,115 @@
++#pragma once
++
++// Finds the storage of Unreal Engine 4 console variables in the game's executable, so mods can change them
++// without the (usually stripped) in-game console.
++
++namespace UnrealConsoleVariables
++{
++   struct ModuleSections
++   {
++      const uint8_t* image_begin = nullptr;
++      const uint8_t* image_end = nullptr;
++      const uint8_t* text_begin = nullptr;
++      const uint8_t* text_end = nullptr;
++      const uint8_t* rdata_begin = nullptr;
++      const uint8_t* rdata_end = nullptr;
++   };
++
++   inline bool GetMainModuleSections(ModuleSections& sections)
++   {
++      const auto* base = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
++      if (!base)
++         return false;
++      const auto* dos_header = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
++      const auto* nt_headers = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos_header->e_lfanew);
++      if (dos_header->e_magic != IMAGE_DOS_SIGNATURE || nt_headers->Signature != IMAGE_NT_SIGNATURE || nt_headers->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
++         return false;
++      sections.image_begin = base;
++      sections.image_end = base + nt_headers->OptionalHeader.SizeOfImage;
++      const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_headers);
++      for (WORD i = 0; i < nt_headers->FileHeader.NumberOfSections; i++, section++)
++      {
++         const uint8_t* begin = base + section->VirtualAddress;
++         const uint8_t* end = begin + section->Misc.VirtualSize;
++         if (std::memcmp(section->Name, ".text\0\0", 8) == 0)
++         {
++            sections.text_begin = begin;
++            sections.text_end = end;
++         }
++         else if (std::memcmp(section->Name, ".rdata\0", 8) == 0)
++         {
++            sections.rdata_begin = begin;
++            sections.rdata_end = end;
++         }
++      }
++      return sections.text_begin && sections.rdata_begin;
++   }
++
++   inline int32_t ReadRel32(const uint8_t* address)
++   {
++      int32_t value;
++      std::memcpy(&value, address, sizeof(value));
++      return value;
++   }
++
++   // Returns the "TConsoleVariableData<T>" (whose first member is the variable's value on the game thread) of the console
++   // variable with the given name, or null if it couldn't be found.
++   // UE4 keeps a static pointer to it for every "TAutoConsoleVariable" (registration) and every cached
++   // "IConsoleManager::FindTConsoleVariableData*()" lookup, and MSVC compiles both to:
++   //   lea rdx, [rip + <name>]                  48 8D 15 <rel32>
++   //   ...  call qword ptr [rax + <offset>]     the IConsoleManager register/find function
++   //   ...  call qword ptr [rdx + <offset8>]    FF 52 <offset8>: IConsoleObject::AsVariable{Int,Float}()
++   //   ...  mov qword ptr [rip + <static>], rax 48 89 05 <rel32>
++   // The executable's code must already be decrypted (e.g. by Steam's DRM), which is the case once the game renders.
++   inline void* FindConsoleVariableData(const wchar_t* name)
++   {
++      ModuleSections sections;
++      if (!GetMainModuleSections(sections))
++         return nullptr;
++
++      // The name as a null terminated UTF-16 string. The compiler can emit more than one copy of it.
++      const size_t name_size = (std::wcslen(name) + 1) * sizeof(wchar_t);
++      std::vector<const uint8_t*> name_copies;
++      for (const uint8_t* p = sections.rdata_begin; p + name_size <= sections.rdata_end; p += sizeof(wchar_t))
++      {
++         if (std::memcmp(p, name, name_size) == 0)
++            name_copies.push_back(p);
++      }
++      if (name_copies.empty())
++         return nullptr;
++
++      constexpr size_t lea_size = 7; // Also the size of the "mov [rip + <static>], rax"
++      constexpr size_t call_size = 3;
++      constexpr size_t max_call_distance = 64; // Bytes from the name's "lea" to the "AsVariable*()" call
++      constexpr size_t max_store_distance = 16; // Bytes from the "AsVariable*()" call to the store of its result
++      for (const uint8_t* p = sections.text_begin; p + lea_size + max_call_distance + call_size + max_store_distance + lea_size <= sections.text_end; p++)
++      {
++         if (p[0] != 0x48 || p[1] != 0x8D || p[2] != 0x15)
++            continue;
++         const uint8_t* lea_target = p + lea_size + ReadRel32(p + 3);
++         if (std::find(name_copies.begin(), name_copies.end(), lea_target) == name_copies.end())
++            continue;
++
++         for (const uint8_t* call = p + lea_size; call < p + lea_size + max_call_distance; call++)
++         {
++            if (call[0] != 0xFF || call[1] != 0x52)
++               continue;
++            for (const uint8_t* store = call + 3; store < call + 3 + max_store_distance; store++)
++            {
++               if (store[0] != 0x48 || store[1] != 0x89 || store[2] != 0x05)
++                  continue;
++               const uint8_t* static_pointer = store + lea_size + ReadRel32(store + 3);
++               if (static_pointer < sections.image_begin || static_pointer + sizeof(void*) > sections.image_end)
++                  break;
++               // Cached lookups are only initialized once their function runs, so they can still be null.
++               void* data = *reinterpret_cast<void* const*>(static_pointer);
++               if (data)
++                  return data;
++               break;
++            }
++            break;
++         }
++      }
++      return nullptr;
++   }
++} // namespace UnrealConsoleVariables
+diff --git a/Source/Games/Unreal Engine/includes/shader_detect.hpp b/Source/Games/Unreal Engine/includes/shader_detect.hpp
+index a91ce588..7b19be82 100644
+--- a/Source/Games/Unreal Engine/includes/shader_detect.hpp	
++++ b/Source/Games/Unreal Engine/includes/shader_detect.hpp	
+@@ -480,6 +480,9 @@ static bool IsUE4TAACandidate(const std::byte* code, size_t size, uint64_t shade
+    {
+       if (loop_hits.size() == endloop_hits.size())
+       {
++#if DEVELOPMENT || TEST
++         reshade::log::message(reshade::log::level::info, std::format("UE4 TAA Shader detection for shader {:#08X} rejected: {} loops", shader_hash, loop_hits.size()).c_str());
++#endif
+          return false;
+       }
+    }
+diff --git a/Source/Games/Unreal Engine/main.cpp b/Source/Games/Unreal Engine/main.cpp
+index 9f285c74..0597264c 100644
+--- a/Source/Games/Unreal Engine/main.cpp	
++++ b/Source/Games/Unreal Engine/main.cpp	
+@@ -6,6 +6,7 @@
+ 
+ #include "..\..\Core\core.hpp"
+ #include "includes\shader_detect.hpp"
++#include "includes\console_variables.hpp"
+ 
+ namespace
+ {
+@@ -30,6 +31,38 @@ namespace
+       bool sr_auto_exposure = true;
+       bool fsr_zero_velocity_factor = false; // FSR 3 only
+ 
++      // Render resolution override, through UE's "r.ScreenPercentage" (and "r.TemporalAA.Upsampling", so TAA, and thus SR, outputs at full resolution).
++      // The first preset leaves both to the game.
++      struct RenderScalePreset
++      {
++         const char* name;
++         float screen_percentage;
++      };
++      constexpr RenderScalePreset render_scale_presets[] = {
++         {"Game Setting", 0.f},
++         {"Native AA (100%)", 100.f},
++         {"Quality (66.7%)", 100.f / 1.5f},
++         {"Balanced (58.8%)", 100.f / 1.7f},
++         {"Performance (50%)", 100.f / 2.f},
++         {"Ultra Performance (33.3%)", 100.f / 3.f},
++         {"Custom", 0.f},
++      };
++      constexpr int render_scale_preset_custom = std::size(render_scale_presets) - 1;
++      int render_scale_preset = 0;
++      float render_scale_custom = 75.f;
++
++      // Storage of the console variables above, looked up once the game renders (null if not found)
++      bool render_scale_cvars_searched = false;
++      float* screen_percentage_cvar = nullptr;
++      int32_t* taa_upsampling_cvar = nullptr;
++      // The game's latest values, restored when the override is turned off. While overriding, a value different from the
++      // one we last wrote means the game set it again (e.g. from its resolution setting).
++      bool render_scale_overridden = false;
++      float game_screen_percentage = 100.f;
++      int32_t game_taa_upsampling = 0;
++      float overridden_screen_percentage = 0.f;
++      int32_t overridden_taa_upsampling = 0;
++
+       bool first_boot = true; // Automatic setting
+       bool enable_hdr = true;
+       bool next_enable_hdr = enable_hdr; // The value we serialize, that will be ignored until reboot
+@@ -67,8 +100,12 @@ namespace
+       return true;
+    }
+ 
+-   static inline bool ProjectionHasJitter(const Math::Matrix44F& m, float2 max_jitter, float eps = 1e-3f)
++   // A jitter of N pixels shows up in the projection matrix as N * 2 * "inverse_view_size". UE's TAA jitter can exceed half
++   // a pixel (e.g. ~0.56 pixels with TAA upsampling), so up to 2 pixels are accepted.
++   static inline bool ProjectionHasJitter(const Math::Matrix44F& m, float2 inverse_view_size)
+    {
++      constexpr float max_jitter_pixels = 2.f;
++      const float2 max_jitter = {inverse_view_size.x * 2.f * max_jitter_pixels, inverse_view_size.y * 2.f * max_jitter_pixels};
+       if ((m.m20 == 0.0f && m.m21 == 0.0f) || std::fabs(m.m20) > max_jitter.x || std::fabs(m.m21) > max_jitter.y)
+       {
+          return false;
+@@ -76,7 +113,9 @@ namespace
+       return true;
+    }
+ 
+-   static inline bool IsViewSizeInvSize(const float4& v, float aspect_ratio, float eps = 1e-3f)
++   // "aspect_ratio_tolerance" is relative: UE rounds the view size of a screen percentage, so the view's aspect ratio
++   // only approximately matches the output's (e.g. 1708x960 at 66.7% of 2560x1440).
++   static inline bool IsViewSizeInvSize(const float4& v, float aspect_ratio, float aspect_ratio_tolerance = 0.01f)
+    {
+       if (v.x > 32.0f && v.y > 32.0f &&
+           v.z > 0.f && v.w > 0.f)
+@@ -86,7 +125,7 @@ namespace
+          if (std::fabs(v.z - inv_w) < FLT_EPSILON &&
+              std::fabs(v.w - inv_h) < FLT_EPSILON)
+          {
+-            if (std::fabs((v.x / v.y) - aspect_ratio) < eps)
++            if (std::fabs((v.x / v.y) / aspect_ratio - 1.f) < aspect_ratio_tolerance)
+             {
+                return true;
+             }
+@@ -295,6 +334,7 @@ public:
+          reshade::register_event<reshade::addon_event::unmap_buffer_region>(UnrealEngine::OnUnmapBufferRegion);
+       }
+    }
++
+    void OnInit(bool async) override
+    {
+       GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0');
+@@ -873,12 +913,18 @@ public:
+             output_color_resource->QueryInterface(&output_color);
+          // Only TAA passes of the same view can re-use the SR output, any other one runs natively
+          if (!output_color.get() || !game_device_data.sr_drawn_output.get() || source_color.get() != game_device_data.sr_drawn_source.get())
++         {
++            LogSRDiagnosticOnce(std::format("SR not used for a TAA pass: SR already ran this frame for another view (drawn size {}x{})", game_device_data.sr_drawn_size.x, game_device_data.sr_drawn_size.y));
+             return DrawOrDispatchOverrideType::None;
++         }
+          D3D11_TEXTURE2D_DESC output_texture_desc, sr_output_texture_desc;
+          output_color->GetDesc(&output_texture_desc);
+          game_device_data.sr_drawn_output->GetDesc(&sr_output_texture_desc);
+          if (output_texture_desc.Format != sr_output_texture_desc.Format || GetSROutputSize(native_device_context, game_device_data, is_compute_shader, taa_shader_info, output_texture_desc) != game_device_data.sr_drawn_size)
++         {
++            LogSRDiagnosticOnce(std::format("SR not used for a TAA pass: SR already ran this frame with a different output (this output {}x{})", output_texture_desc.Width, output_texture_desc.Height));
+             return DrawOrDispatchOverrideType::None;
++         }
+          CopySROutput(native_device_context, output_color.get(), game_device_data.sr_drawn_output.get(), game_device_data.sr_drawn_size);
+          return DrawOrDispatchOverrideType::Skip;
+       }
+@@ -926,10 +972,15 @@ public:
+          }
+          const bool dlss_inputs_valid = shader_resources[taa_shader_info.source_texture_register].get() != nullptr && shader_resources[taa_shader_info.depth_texture_register].get() != nullptr && shader_resources[taa_shader_info.velocity_texture_register].get() != nullptr && (render_target_views[0].get() != nullptr || unordered_access_views[0].get() != nullptr);
+          ASSERT_ONCE(dlss_inputs_valid);
++         if (!dlss_inputs_valid)
++            LogSRDiagnosticOnce(std::format("SR not used for a TAA pass: missing inputs (color {}, depth {}, velocity {})", shader_resources[taa_shader_info.source_texture_register].get() != nullptr, shader_resources[taa_shader_info.depth_texture_register].get() != nullptr, shader_resources[taa_shader_info.velocity_texture_register].get() != nullptr));
+          if (dlss_inputs_valid)
+          {
+             if (game_device_data.found_per_view_globals.load() == false)
++            {
++               LogSRDiagnosticOnce("SR not used for a TAA pass: the per-view constant buffer wasn't found this frame");
+                return DrawOrDispatchOverrideType::None;
++            }
+             auto* sr_instance_data = device_data.GetSRInstanceData();
+             ASSERT_ONCE(sr_instance_data);
+ 
+@@ -954,6 +1005,7 @@ public:
+                // the view, whose size UE rounds to whole pixels, so the two aspect ratios only match approximately.
+                if (std::fabs(output_aspect_ratio / render_aspect_ratio - 1.f) > 0.01f)
+                {
++                  LogSRDiagnosticOnce(std::format("SR not used for a TAA pass: aspect ratio mismatch (output {}x{}, view {}x{})", taa_output_texture_desc.Width, taa_output_texture_desc.Height, device_data.render_resolution.x, device_data.render_resolution.y));
+                   device_data.force_reset_sr = true;
+                   return DrawOrDispatchOverrideType::None;
+                }
+@@ -983,6 +1035,8 @@ public:
+             settings_data.mvs_y_scale = 1.0f;
+             const bool sr_output_supported = sr_output_size.x >= sr_instance_data->min_resolution && sr_output_size.y >= sr_instance_data->min_resolution;
+             const bool sr_settings_updated = sr_output_supported && sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
++            if (!sr_settings_updated)
++               LogSRDiagnosticOnce(std::format("SR not used for a TAA pass: SR couldn't be set up (output {}x{}, render {}x{}, output texture {}x{})", sr_output_size.x, sr_output_size.y, settings_data.render_width, settings_data.render_height, taa_output_texture_desc.Width, taa_output_texture_desc.Height));
+ 
+             constexpr bool dlss_use_native_uav = true;
+             bool dlss_output_supports_uav = dlss_use_native_uav && (taa_output_texture_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0 && !sr_output_is_partial;
+@@ -1162,8 +1216,73 @@ public:
+       return DrawOrDispatchOverrideType::None;
+    }
+ 
++   // Logs an SR diagnostic (e.g. why a TAA pass wasn't replaced by SR), once per distinct message, to diagnose games without spamming the log.
++   // "key" identifies the message, for messages with values that change every frame.
++   static void LogSRDiagnosticOnce(const std::string& message, const std::string& key = {})
++   {
++#if DEVELOPMENT || TEST
++      static std::mutex mutex;
++      static std::unordered_set<std::string> logged;
++      const std::scoped_lock lock(mutex);
++      if (logged.insert(key.empty() ? message : key).second)
++         reshade::log::message(reshade::log::level::info, ("UE4: " + message).c_str());
++#endif
++   }
++
++   // Rewritten every frame, as games can set these console variables at any time (e.g. from their own resolution setting).
++   static void ApplyRenderScaleOverride()
++   {
++      if (!render_scale_cvars_searched)
++      {
++         render_scale_cvars_searched = true;
++         screen_percentage_cvar = static_cast<float*>(UnrealConsoleVariables::FindConsoleVariableData(L"r.ScreenPercentage"));
++         taa_upsampling_cvar = static_cast<int32_t*>(UnrealConsoleVariables::FindConsoleVariableData(L"r.TemporalAA.Upsampling"));
++         // Never write to memory that doesn't hold a plausible value for the variable, in case the code pattern matched something else
++         if (screen_percentage_cvar && !(*screen_percentage_cvar > 0.f && *screen_percentage_cvar <= 400.f))
++         {
++            reshade::log::message(reshade::log::level::warning, std::format("UE4: Ignoring r.ScreenPercentage, its value {} is not plausible", *screen_percentage_cvar).c_str());
++            screen_percentage_cvar = nullptr;
++         }
++         if (taa_upsampling_cvar && (*taa_upsampling_cvar < 0 || *taa_upsampling_cvar > 1))
++         {
++            reshade::log::message(reshade::log::level::warning, std::format("UE4: Ignoring r.TemporalAA.Upsampling, its value {} is not plausible", *taa_upsampling_cvar).c_str());
++            taa_upsampling_cvar = nullptr;
++         }
++         reshade::log::message(reshade::log::level::info, std::format("UE4: Render scale console variables: r.ScreenPercentage {} ({}), r.TemporalAA.Upsampling {} ({})",
++            screen_percentage_cvar ? "found" : "not found", screen_percentage_cvar ? *screen_percentage_cvar : 0.f,
++            taa_upsampling_cvar ? "found" : "not found", taa_upsampling_cvar ? *taa_upsampling_cvar : -1).c_str());
++      }
++      if (!screen_percentage_cvar)
++         return;
++
++      if (render_scale_preset != 0)
++      {
++         if (!render_scale_overridden || *screen_percentage_cvar != overridden_screen_percentage)
++            game_screen_percentage = *screen_percentage_cvar;
++         if (taa_upsampling_cvar && (!render_scale_overridden || *taa_upsampling_cvar != overridden_taa_upsampling))
++            game_taa_upsampling = *taa_upsampling_cvar;
++         render_scale_overridden = true;
++
++         overridden_screen_percentage = render_scale_preset == render_scale_preset_custom ? render_scale_custom : render_scale_presets[render_scale_preset].screen_percentage;
++         *screen_percentage_cvar = overridden_screen_percentage;
++         if (taa_upsampling_cvar)
++         {
++            overridden_taa_upsampling = 1;
++            *taa_upsampling_cvar = overridden_taa_upsampling;
++         }
++      }
++      else if (render_scale_overridden)
++      {
++         *screen_percentage_cvar = game_screen_percentage;
++         if (taa_upsampling_cvar)
++            *taa_upsampling_cvar = game_taa_upsampling;
++         render_scale_overridden = false;
++      }
++   }
++
+    void OnPresent(ID3D11Device* native_device, DeviceData& device_data) override
+    {
++      ApplyRenderScaleOverride();
+       auto& game_device_data = GetGameDeviceData(device_data);
+       game_device_data.found_per_view_globals = false;
+       game_device_data.camera_cut = !device_data.taa_detected && !device_data.has_drawn_sr && !device_data.force_reset_sr;
+@@ -1345,6 +1464,45 @@ public:
+ #if ENABLE_SR
+       ImGui::NewLine();
+ 
++      {
++         const bool render_scale_available = screen_percentage_cvar != nullptr;
++         if (!render_scale_available)
++            ImGui::BeginDisabled();
++         if (ImGui::BeginCombo("Render Resolution", render_scale_presets[render_scale_preset].name))
++         {
++            for (int i = 0; i < int(std::size(render_scale_presets)); i++)
++            {
++               const bool selected = i == render_scale_preset;
++               if (ImGui::Selectable(render_scale_presets[i].name, selected))
++               {
++                  render_scale_preset = i;
++                  reshade::set_config_value(runtime, NAME, "RenderScalePreset", render_scale_preset);
++               }
++               if (selected)
++                  ImGui::SetItemDefaultFocus();
++            }
++            ImGui::EndCombo();
++         }
++         if (!render_scale_available)
++            ImGui::EndDisabled();
++         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
++         {
++            if (render_scale_available)
++               ImGui::SetTooltip("Sets the resolution the game renders at (\"r.ScreenPercentage\"), and enables TAA upsampling (\"r.TemporalAA.Upsampling\"),\nso Super Resolution upscales from it to the output resolution.\n\"Game Setting\" leaves both to the game.");
++            else
++               ImGui::SetTooltip("The render resolution console variable wasn't found in this game's executable.");
++         }
++         if (render_scale_available && render_scale_preset == render_scale_preset_custom)
++         {
++            if (ImGui::SliderFloat("Custom Render Resolution", &render_scale_custom, 25.f, 100.f, "%.1f%%"))
++               reshade::set_config_value(runtime, NAME, "RenderScaleCustom", render_scale_custom);
++         }
++         if (device_data.sr_type != SR::Type::None && device_data.taa_detected)
++            ImGui::Text("Rendering at %.0fx%.0f, output %.0fx%.0f", game_device_data.render_resolution.x, game_device_data.render_resolution.y, device_data.output_resolution.x, device_data.output_resolution.y);
++      }
++
++      ImGui::NewLine();
++
+       // TODO: render this below the SR selection
+       // Disable the checkbox if SR is not enabled
+       bool sr_enabled = device_data.sr_type != SR::Type::None;
+@@ -1390,6 +1548,10 @@ public:
+       reshade::get_config_value(runtime, NAME, "HDRHighlightsHuePreservation", cb_luma_global_settings.GameSettings.HDRHighlightsHuePreservation);
+       reshade::get_config_value(runtime, NAME, "HDRHighlightsChrominancePreservation", cb_luma_global_settings.GameSettings.HDRHighlightsChrominancePreservation);
+       reshade::get_config_value(runtime, NAME, "HDRChrominance", cb_luma_global_settings.GameSettings.HDRChrominance);
++      reshade::get_config_value(runtime, NAME, "RenderScalePreset", render_scale_preset);
++      reshade::get_config_value(runtime, NAME, "RenderScaleCustom", render_scale_custom);
++      render_scale_preset = std::clamp(render_scale_preset, 0, render_scale_preset_custom);
++      render_scale_custom = std::clamp(render_scale_custom, 25.f, 100.f);
+    }
+ 
+    static void OnMapBufferRegion(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** data)
+@@ -1456,6 +1618,17 @@ public:
+          Matrix44F matrix_a;
+          std::memcpy(&matrix_a, &float_data[global_cb_info.view_to_clip_start_index], sizeof(Matrix44F));
+          bool is_global_cb = IsViewSizeInvSize(vsize_and_inv_size, device_data.render_resolution.x / device_data.render_resolution.y) && MatrixLikeProjection(matrix_a) && ProjectionHasJitter(matrix_a, {vsize_and_inv_size.z, vsize_and_inv_size.w});
++         // Other views (e.g. scene captures) use buffers of the same size, only report the ones that could be the main view
++         if (!is_global_cb && vsize_and_inv_size.x >= device_data.output_resolution.x * 0.25f && vsize_and_inv_size.y >= device_data.output_resolution.y * 0.25f)
++         {
++            const bool view_size_ok = IsViewSizeInvSize(vsize_and_inv_size, device_data.render_resolution.x / device_data.render_resolution.y);
++            const bool projection_ok = MatrixLikeProjection(matrix_a);
++            const bool jitter_ok = ProjectionHasJitter(matrix_a, {vsize_and_inv_size.z, vsize_and_inv_size.w});
++            LogSRDiagnosticOnce(std::format("Per-view constant buffer candidate rejected: view size check {}, projection check {}, jitter check {} (view {}x{} inverse {:.9g} {:.9g}, previous view {}x{}, jitter {:.9g} {:.9g})",
++                             view_size_ok, projection_ok, jitter_ok,
++                             vsize_and_inv_size.x, vsize_and_inv_size.y, vsize_and_inv_size.z, vsize_and_inv_size.w, device_data.render_resolution.x, device_data.render_resolution.y, matrix_a.m20, matrix_a.m21),
++               std::format("cb {} {} {} {}x{}", view_size_ok, projection_ok, jitter_ok, vsize_and_inv_size.x, vsize_and_inv_size.y));
++         }
+          if (is_global_cb)
+          {
+             game_device_data.jitter.x = matrix_a.m20;
+-- 
+2.56.0
+

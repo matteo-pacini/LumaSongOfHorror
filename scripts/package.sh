@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Builds the release zip from a CMake build directory, with the same layout as Luma's own
 # "Luma-Unreal_Engine.zip" (minus DLSS, see README), plus the third-party licenses.
-# Usage: scripts/package.sh <build dir> <version>   ->   dist/LumaSongOfHorror-<version>.zip
+# Usage: scripts/package.sh <build dir> <version> [<variant>]
+#   ->   dist/LumaSongOfHorror-<version>[-<variant>].zip  (e.g. variant "Test" for a -DLUMA_TEST_BUILD=ON build)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 build_dir=$1
 version=$2
+variant=${3:+-$3}
 luma=Luma-Framework
 ext=$luma/Source/External
 
@@ -51,7 +53,7 @@ cp "$ext/zydis/dependencies/zycore/LICENSE" "$stage/pkg/Licenses/Zycore_LICENSE.
 cp "$ext/reshade/deps/stb/LICENSE" "$stage/pkg/Licenses/stb_LICENSE.txt"
 cp third_party_licenses/NVIDIA_NVAPI_LICENSE.txt "$stage/pkg/Licenses/"
 
-zip_name="LumaSongOfHorror-$version.zip"
+zip_name="LumaSongOfHorror-$version$variant.zip"
 rm -f "dist/$zip_name"
 (cd "$stage/pkg" && bsdtar -a -cf "$OLDPWD/dist/$zip_name" -- *)
 (cd dist && sha256sum "$zip_name" > "$zip_name.sha256")

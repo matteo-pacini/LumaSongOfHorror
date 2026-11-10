@@ -41,6 +41,12 @@ jobs:
           nix develop --command cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/clang-cl-xwin.cmake -DCMAKE_BUILD_TYPE=Release
           nix develop --command cmake --build build
 
+      # Luma's Test configuration: adds the overlay's Info tab (render and output resolution) and extra logging.
+      - name: Build Test variant
+        run: |
+          nix develop --command cmake -S . -B build-test -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/clang-cl-xwin.cmake -DCMAKE_BUILD_TYPE=Release -DLUMA_TEST_BUILD=ON
+          nix develop --command cmake --build build-test
+
       - name: Package
         id: package
         run: |
@@ -51,6 +57,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           nix develop --command ./scripts/package.sh build "$version"
+          nix develop --command ./scripts/package.sh build-test "$version" Test
 
       - uses: actions/upload-artifact@v4
         with:
@@ -66,5 +73,6 @@ jobs:
           body: |
             Patched Luma Framework Unreal Engine mod with FSR 4 / FSR 3 / XeSS upscaling for Song of Horror.
             Extract the zip next to `SongOfHorror-Win64-Shipping.exe` and follow the [installation steps](https://github.com/${{ github.repository }}#installation).
+            The `-Test` zip is Luma's Test configuration: the same mod plus an **Info** tab in the overlay (render and output resolution) and more logging.
 
             Developed and tested on Linux only (AMD RX 6800 XT, Proton-CachyOS).
