@@ -71,8 +71,8 @@ jobs:
           name: LumaSongOfHorror ${{ github.ref_name }}
           files: dist/*
           body: |
-            Patched Luma Framework Unreal Engine mod with FSR 4 / FSR 3 / XeSS upscaling for Song of Horror.
+            Patched Luma Framework Unreal Engine mod with FSR 4 / FSR 3 / XeSS upscaling for Song of Horror, with a Render Resolution setting for the FSR presets.
             Extract the zip next to `SongOfHorror-Win64-Shipping.exe` and follow the [installation steps](https://github.com/${{ github.repository }}#installation).
             The `-Test` zip is Luma's Test configuration: the same mod plus an **Info** tab in the overlay (render and output resolution) and more logging.
 
-            Developed and tested on Linux only (AMD RX 6800 XT, Proton-CachyOS).
+            Developed and tested on Linux only (AMD RX 6800 XT, Proton-CachyOS), with FSR 4 only (FSR 3 and XeSS are untested), against Steam build 8260563 of the game.
