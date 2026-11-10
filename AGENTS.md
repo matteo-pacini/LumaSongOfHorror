@@ -81,3 +81,5 @@ deploying or editing `Engine.ini` (the game rewrites it on exit, with CRLF line 
   `PatchShaderSync`) hasn't been found yet.
 - Each preset change recreates the FSR context three times (UE applies the new view size a frame late).
 - Only Steam build 8260563 is supported; the console variable lookup depends on its code.
+- Only FSR 4 (Luma's DX12 interop path, upgraded to INT8 by Proton-CachyOS) was tested. FSR 3 (native
+  DX11) and XeSS (DX12 interop on non-Intel GPUs) are compiled in but were never selected in game.

@@ -10,6 +10,7 @@ itself goes to the Luma authors.
 
 > Developed and tested on **Linux only**: AMD Radeon RX 6800 XT (RDNA 2), FSR 4 (INT8), a
 > Proton-CachyOS 11.0 based build. Windows, NVIDIA GPUs and other Unreal Engine games are untested.
+> Only FSR 4 was tested: the FSR 3 and XeSS options are built in but untested.
 >
 > Only works with the latest Steam build of the game, **build 8260563**
 > ([SteamDB patch notes](https://steamdb.info/app/1096570/patchnotes/)). Other builds and stores
