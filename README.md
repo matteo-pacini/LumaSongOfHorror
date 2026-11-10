@@ -11,6 +11,11 @@ mod itself goes to the Luma authors.
 > Developed and tested on **Linux only**: AMD Radeon RX 6800 XT (RDNA 2), FSR 4 (INT8), a
 > Proton-CachyOS 11.0 based build. Windows, NVIDIA GPUs and other Unreal Engine games are untested.
 
+![Song of Horror at 2560x1440, upscaled with FSR 4 from 2048x1152, with the Luma overlay open](docs/screenshot.jpg)
+
+*2560x1440 output upscaled with FSR 4 from a 2048x1152 render resolution on an RX 6800 XT,
+with the Luma overlay (`Home`) set to FSR 4 and MangoHud showing the 144 FPS cap.*
+
 ## What the patches change
 
 Luma's Unreal Engine mod replaces the game's TAA with an upscaler, but always told the upscaler that
@@ -77,6 +82,26 @@ application, which a mod cannot provide.
 | `FSR4_UPGRADE=1` | Read by Proton-CachyOS's AMD driver layer (`amdxc64`) to offer FSR 4 on GPUs older than RDNA 4. |
 | `WINEDLLOVERRIDES="dxgi=n,b"` | Loads ReShade (the mod's `dxgi.dll`) instead of Wine's built-in DXGI. |
 | `-dx11` | The mod only supports DirectX 11. |
+
+## Checking that it works
+
+Luma writes its log to `ReShade.log` next to the game's executable. With the settings above, it
+shows FSR 4 replacing the game's TAA and upscaling from the render resolution to the output
+resolution. This is from the v1.0.0 test run (2560x1440 output, ReShade's paths shortened):
+
+```
+21:57:05:883 [  376] | INFO  | Initializing crosire's ReShade version '6.8.0.1' (64-bit) loaded from '...\Win64\dxgi.dll'
+21:57:07:922 [  376] | INFO  | Registered add-on "Luma" v0.0.0.0 using ReShade API version 20.
+21:57:08:413 [  376] | INFO  | [Luma] FSR4: Initialized FSR 4.1.2
+21:57:15:347 [ 1156] | INFO  | [Luma] UE4: Detected UE4 TAA. Hash: 0xC38EDE56
+21:57:15:398 [ 1156] | INFO  | [Luma] FSR4: Created context (render 2560x1440, output 2560x1440), provider "4.1.2"
+21:57:26:703 [ 1212] | INFO  | [Luma] FSR4: Created context (render 2048x1152, output 2560x1440), provider "4.1.2"
+```
+
+The first context is created in the main menu, which the game renders at full resolution; the
+second one, once in game, upscales from 2048x1152. The Luma overlay only shows the selected
+upscaler, so the log is the place to check the render and output resolution (or a
+`-DLUMA_TEST_BUILD=ON` build, which adds an **Info** tab with both).
 
 ## Troubleshooting
 
