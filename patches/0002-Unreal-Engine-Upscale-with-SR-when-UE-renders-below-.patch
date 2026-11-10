@@ -1,0 +1,98 @@
+From d398e760af2bed7fc42e11fa4a35442ccf361853 Mon Sep 17 00:00:00 2001
+From: Matteo Pacini <m+github@matteopacini.me>
+Date: Tue, 10 Nov 2026 21:45:24 +0000
+Subject: [PATCH 2/2] Unreal Engine: Upscale with SR when UE renders below the
+ output resolution
+
+The mod always passed the swapchain size as the SR render resolution, so SR
+could only anti-alias at native resolution. With a screen percentage below
+100% and r.TemporalAA.Upsampling=1, TAA runs at the view size and outputs the
+full resolution:
+- Use the view size from the per-view cbuffer as the SR render resolution.
+- Accept small aspect ratio differences from UE rounding the view size.
+- Report the real SR render resolution scale.
+- Decode motion vectors with UVs relative to the scene textures' actual size,
+  which UE pads beyond the view size.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Luma_MotionVec_UE4_Decode.hlsl              | 10 +++++++---
+ Source/Games/Unreal Engine/main.cpp             | 17 +++++++++--------
+ 2 files changed, 16 insertions(+), 11 deletions(-)
+
+diff --git a/Shaders/Unreal Engine/Luma_MotionVec_UE4_Decode.hlsl b/Shaders/Unreal Engine/Luma_MotionVec_UE4_Decode.hlsl
+index c0379963..e535dbd0 100644
+--- a/Shaders/Unreal Engine/Luma_MotionVec_UE4_Decode.hlsl	
++++ b/Shaders/Unreal Engine/Luma_MotionVec_UE4_Decode.hlsl	
+@@ -52,7 +52,11 @@ void main(float4 pos: SV_Position0, out float2 OutMotionVectorTex: SV_Target0)
+     uint4 viewportRect = uint4((uint2)LumaData.GameData.ViewportRect.xy, (uint2)(LumaData.GameData.ViewportRect.xy +
+                                                                                  LumaData.GameData.RenderResolution.xy));
+     float4 renderRes = LumaData.GameData.RenderResolution;
+-    float4 viewExtent = LumaData.GameData.RenderResolution;
++    // UE's scene textures (depth, velocity) can be bigger than the view, as their size is rounded up and
++    // pooled, so UVs into them have to be relative to their actual size, not to the render resolution.
++    float2 sceneTextureSize;
++    SceneDepthTex.GetDimensions(sceneTextureSize.x, sceneTextureSize.y);
++    float4 viewExtent = float4(sceneTextureSize, 1.0 / sceneTextureSize);
+ 
+     float2 jitter =
+       LumaData.GameData.JitterOffset.xy * LumaData.GameData.RenderResolution.xy * float2(0.5, -0.5);
+@@ -68,7 +72,7 @@ void main(float4 pos: SV_Position0, out float2 OutMotionVectorTex: SV_Target0)
+ 
+    float2 offset = float2(0.0, 0.0);
+ 
+-   float2 nearestSampleUV = (coords + 0.5f) * renderRes.zw; //extent
++   float2 nearestSampleUV = (coords + 0.5f) * viewExtent.zw;
+    float2 uv = (float2(globalThreadId) + 0.5f) * renderRes.zw;
+ 
+    float2 centerPixel = uv * renderRes.xy + jitter;
+@@ -108,7 +112,7 @@ void main(float4 pos: SV_Position0, out float2 OutMotionVectorTex: SV_Target0)
+       float maxCrossDepth = max(maxCrossXY, maxCrossZW);
+       if (maxCrossDepth > nearestPos.z)
+       {
+-         offset = depthoffset * renderRes.zw; //extent
++         offset = depthoffset * viewExtent.zw;
+          nearestPos.z = maxCrossDepth;
+       }
+    }
+diff --git a/Source/Games/Unreal Engine/main.cpp b/Source/Games/Unreal Engine/main.cpp
+index 3ab0aa21..9f285c74 100644
+--- a/Source/Games/Unreal Engine/main.cpp	
++++ b/Source/Games/Unreal Engine/main.cpp	
+@@ -948,24 +948,25 @@ public:
+             if (taa_output_texture_desc.Width != device_data.render_resolution.x || taa_output_texture_desc.Height != device_data.render_resolution.y)
+             {
+                float output_aspect_ratio = static_cast<float>(taa_output_texture_desc.Width) / static_cast<float>(taa_output_texture_desc.Height);
+-               float swapchain_aspect_ratio = device_data.render_resolution.x / device_data.render_resolution.y;
++               float render_aspect_ratio = device_data.render_resolution.x / device_data.render_resolution.y;
+ 
+-               if (std::fabs(output_aspect_ratio - swapchain_aspect_ratio) > FLT_EPSILON)
++               // With a screen percentage below 100% and TAA upsampling ("r.TemporalAA.Upsampling"), the output is bigger than
++               // the view, whose size UE rounds to whole pixels, so the two aspect ratios only match approximately.
++               if (std::fabs(output_aspect_ratio / render_aspect_ratio - 1.f) > 0.01f)
+                {
+                   device_data.force_reset_sr = true;
+                   return DrawOrDispatchOverrideType::None;
+                }
+             }
+ 
+-            D3D11_VIEWPORT viewport;
+-            uint32_t num_viewports = 1;
+-            native_device_context->RSGetViewports(&num_viewports, &viewport);
+-            // game_device_data.viewport_rect         = {viewport.TopLeftX, viewport.TopLeftY, viewport.Width, viewport.Height};
+-            // game_device_data.render_resolution     = {(float)taa_output_texture_desc.Width, (float)taa_output_texture_desc.Height, 1.0f / (float)taa_output_texture_desc.Width, 1.0f / (float)taa_output_texture_desc.Height};
+-            device_data.sr_render_resolution_scale = 1.0f; // DLAA only
++            // The view size from the per-view cbuffer (see "OnUnmapBufferRegion") is the resolution UE rendered the scene at,
++            // which is lower than the TAA output when upsampling, so SR upscales instead of only anti-aliasing.
++            game_device_data.render_resolution = {device_data.render_resolution.x, device_data.render_resolution.y, 1.0f / device_data.render_resolution.x, 1.0f / device_data.render_resolution.y};
+ 
+             const uint2 sr_output_size = GetSROutputSize(native_device_context, game_device_data, is_compute_shader, taa_shader_info, taa_output_texture_desc);
+             const bool sr_output_is_partial = sr_output_size != uint2{taa_output_texture_desc.Width, taa_output_texture_desc.Height}; // SR then writes into a copy of the output area
++            if (sr_output_size.y != 0)
++               device_data.sr_render_resolution_scale = game_device_data.render_resolution.y / static_cast<float>(sr_output_size.y);
+ 
+             SR::SettingsData settings_data;
+             settings_data.output_width = sr_output_size.x;
+-- 
+2.56.0
+

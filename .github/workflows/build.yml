@@ -1,0 +1,70 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # creating releases on tags
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: cachix/install-nix-action@v30
+
+      - name: Cache MSVC runtime and Windows SDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            .xwin
+            .xwin-cache
+            .winsdk
+          key: windows-sdk-${{ hashFiles('scripts/fetch-sdk.sh') }}
+
+      - name: Apply patches
+        run: nix develop --command ./scripts/apply-patches.sh
+
+      # Downloads Microsoft's MSVC runtime and Windows SDK, accepting their license terms.
+      - name: Fetch MSVC runtime and Windows SDK
+        run: nix develop --command ./scripts/fetch-sdk.sh
+
+      - name: Build
+        run: |
+          nix develop --command cmake -S . -B build -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/clang-cl-xwin.cmake -DCMAKE_BUILD_TYPE=Release
+          nix develop --command cmake --build build
+
+      - name: Package
+        id: package
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          nix develop --command ./scripts/package.sh build "$version"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LumaSongOfHorror-${{ steps.package.outputs.version }}
+          path: dist/*
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: LumaSongOfHorror ${{ github.ref_name }}
+          files: dist/*
+          body: |
+            Patched Luma Framework Unreal Engine mod with FSR 4 / FSR 3 / XeSS upscaling for Song of Horror.
+            Extract the zip next to `SongOfHorror-Win64-Shipping.exe` and follow the [installation steps](https://github.com/${{ github.repository }}#installation).
+
+            Developed and tested on Linux only (AMD RX 6800 XT, Proton-CachyOS).

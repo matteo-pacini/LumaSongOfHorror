@@ -1,0 +1,68 @@
+From 878d2df12270406e03fdb00d30bdaa033cbde334 Mon Sep 17 00:00:00 2001
+From: Matteo Pacini <m+github@matteopacini.me>
+Date: Tue, 10 Nov 2026 21:45:24 +0000
+Subject: [PATCH 1/2] Fix rvalue com_ptr casts that only MSVC accepts
+
+Casting a com_ptr<Derived> temporary to com_ptr<ID3D11Resource>&& is an
+MSVC extension that clang-cl rejects. Transfer ownership explicitly instead,
+which keeps the same reference counting.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/Core/utils/resource.hpp      | 8 ++++----
+ Source/Games/Unreal Engine/main.cpp | 4 ++--
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/Source/Core/utils/resource.hpp b/Source/Core/utils/resource.hpp
+index 01ae85bf..0e4bbd40 100644
+--- a/Source/Core/utils/resource.hpp
++++ b/Source/Core/utils/resource.hpp
+@@ -508,19 +508,19 @@ com_ptr<ID3D11Resource> CloneResource(ID3D11Device* device, ID3D11DeviceContext*
+    {
+    case D3D11_RESOURCE_DIMENSION_BUFFER:
+    {
+-      return (com_ptr<ID3D11Resource>&&)(CloneResourceTyped<ID3D11Buffer>(device, device_context, static_cast<ID3D11Buffer*>(source)));
++      return com_ptr<ID3D11Resource>((CloneResourceTyped<ID3D11Buffer>(device, device_context, static_cast<ID3D11Buffer*>(source))).release(), true);
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+    {
+-      return (com_ptr<ID3D11Resource>&&)CloneResourceTyped<ID3D11Texture1D>(device, device_context, static_cast<ID3D11Texture1D*>(source));
++      return com_ptr<ID3D11Resource>(CloneResourceTyped<ID3D11Texture1D>(device, device_context, static_cast<ID3D11Texture1D*>(source)).release(), true);
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+    {
+-      return (com_ptr<ID3D11Resource>&&)CloneResourceTyped<ID3D11Texture2D>(device, device_context, static_cast<ID3D11Texture2D*>(source));
++      return com_ptr<ID3D11Resource>(CloneResourceTyped<ID3D11Texture2D>(device, device_context, static_cast<ID3D11Texture2D*>(source)).release(), true);
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+    {
+-      return (com_ptr<ID3D11Resource>&&)CloneResourceTyped<ID3D11Texture3D>(device, device_context, static_cast<ID3D11Texture3D*>(source));
++      return com_ptr<ID3D11Resource>(CloneResourceTyped<ID3D11Texture3D>(device, device_context, static_cast<ID3D11Texture3D*>(source)).release(), true);
+    }
+    }
+ 
+diff --git a/Source/Games/Unreal Engine/main.cpp b/Source/Games/Unreal Engine/main.cpp
+index de70edef..3ab0aa21 100644
+--- a/Source/Games/Unreal Engine/main.cpp	
++++ b/Source/Games/Unreal Engine/main.cpp	
+@@ -651,7 +651,7 @@ public:
+                {
+                   if (!game_device_data.tonemap_lut_texture || game_device_data.tonemap_lut_texture_is_3d)
+                   {
+-                     game_device_data.tonemap_lut_texture = (com_ptr<ID3D11Resource>&&)CloneTexture<ID3D11Texture2D>(native_device, texture2d.get(), DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BIND_RENDER_TARGET, false, false, native_device_context);
++                     game_device_data.tonemap_lut_texture = com_ptr<ID3D11Resource>(CloneTexture<ID3D11Texture2D>(native_device, texture2d.get(), DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BIND_RENDER_TARGET, false, false, native_device_context).release(), true);
+                      game_device_data.tonemap_lut_texture_srv.reset();
+                      game_device_data.tonemap_lut_texture_uav.reset();
+                      native_device->CreateShaderResourceView(game_device_data.tonemap_lut_texture.get(), nullptr, &game_device_data.tonemap_lut_texture_srv);
+@@ -672,7 +672,7 @@ public:
+                {
+                   if (!game_device_data.tonemap_lut_texture || !game_device_data.tonemap_lut_texture_is_3d)
+                   {
+-                     game_device_data.tonemap_lut_texture = (com_ptr<ID3D11Resource>&&)CloneTexture<ID3D11Texture3D>(native_device, texture3d.get(), DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BIND_RENDER_TARGET, false, false, native_device_context);
++                     game_device_data.tonemap_lut_texture = com_ptr<ID3D11Resource>(CloneTexture<ID3D11Texture3D>(native_device, texture3d.get(), DXGI_FORMAT_R16G16B16A16_FLOAT, D3D11_BIND_UNORDERED_ACCESS, D3D11_BIND_RENDER_TARGET, false, false, native_device_context).release(), true);
+                      game_device_data.tonemap_lut_texture_srv.reset();
+                      game_device_data.tonemap_lut_texture_uav.reset();
+                      native_device->CreateShaderResourceView(game_device_data.tonemap_lut_texture.get(), nullptr, &game_device_data.tonemap_lut_texture_srv);
+-- 
+2.56.0
+

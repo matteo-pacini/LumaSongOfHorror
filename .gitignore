@@ -1,0 +1,6 @@
+/.xwin/
+/.xwin-cache/
+/.winsdk/
+/build*/
+/out/
+/dist/
