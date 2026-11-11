@@ -1,16 +1,26 @@
-From 63fd829d9f22476f07bb5717870fa2b7e3813db5 Mon Sep 17 00:00:00 2001
+From 85f9be50f19d43b752cb307f4efac43e3aa39038 Mon Sep 17 00:00:00 2001
 From: Matteo Pacini <m+github@matteopacini.me>
 Date: Tue, 10 Nov 2026 23:04:47 +0000
-Subject: [PATCH 3/3] Unreal Engine: Render resolution setting, and SR at lower
+Subject: [PATCH 3/4] Unreal Engine: Render resolution setting, and SR at lower
  render resolutions
 
-Add a "Render Resolution" setting with the FSR presets (Native AA, Quality,
-Balanced, Performance, Ultra Performance) and a custom value. It finds the
-storage of UE's "r.ScreenPercentage" and "r.TemporalAA.Upsampling" console
-variables in the game's executable, from the code UE generates for
-TAutoConsoleVariable and cached console variable lookups, and writes them
-every frame, so games that reset them from their own settings don't undo it.
-"Game Setting" restores the game's latest values.
+Add a "Render Resolution" setting with upscaler presets (Native AA, then
+76.9%, 66.7%, 58.8%, 50%, 43.5% and 33.3%) and a custom value. Presets are
+named after the selected SR's: XeSS's (Ultra Quality Plus to Ultra
+Performance), or FSR's, which has no 76.9% and 43.5% presets, so those are
+only listed for XeSS. Presets are saved by index, in the order they were
+added.
+
+The setting finds the storage of UE's "r.ScreenPercentage" and
+"r.TemporalAA.Upsampling" console variables in the game's executable, from
+the code UE generates for TAutoConsoleVariable and cached console variable
+lookups, and writes them every frame, so games that reset them from their
+own settings don't undo it. "Game Setting" restores the game's latest
+values.
+
+While a preset overrides the render resolution, SR isn't set up for dynamic
+resolution: FSR then sizes its resources for the render resolution, and
+XeSS uses the preset matching it rather than Ultra Performance.
 
 Below about 71%, UE renders views at sizes whose aspect ratio differs more
 from the output's (e.g. 1708x960 at 66.7% of 2560x1440), and its TAA jitter
@@ -23,10 +33,10 @@ which TAA shader candidates were rejected for having loops.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../includes/console_variables.hpp            | 115 +++++++++++
+ .../includes/console_variables.hpp            | 115 ++++++++++
  .../Unreal Engine/includes/shader_detect.hpp  |   3 +
- Source/Games/Unreal Engine/main.cpp           | 179 +++++++++++++++++-
- 3 files changed, 294 insertions(+), 3 deletions(-)
+ Source/Games/Unreal Engine/main.cpp           | 198 +++++++++++++++++-
+ 3 files changed, 312 insertions(+), 4 deletions(-)
  create mode 100644 Source/Games/Unreal Engine/includes/console_variables.hpp
 
 diff --git a/Source/Games/Unreal Engine/includes/console_variables.hpp b/Source/Games/Unreal Engine/includes/console_variables.hpp
@@ -165,7 +175,7 @@ index a91ce588..7b19be82 100644
        }
     }
 diff --git a/Source/Games/Unreal Engine/main.cpp b/Source/Games/Unreal Engine/main.cpp
-index 9f285c74..0597264c 100644
+index 9f285c74..fa14912e 100644
 --- a/Source/Games/Unreal Engine/main.cpp	
 +++ b/Source/Games/Unreal Engine/main.cpp	
 @@ -6,6 +6,7 @@
@@ -176,27 +186,33 @@ index 9f285c74..0597264c 100644
  
  namespace
  {
-@@ -30,6 +31,38 @@ namespace
+@@ -30,6 +31,44 @@ namespace
        bool sr_auto_exposure = true;
        bool fsr_zero_velocity_factor = false; // FSR 3 only
  
 +      // Render resolution override, through UE's "r.ScreenPercentage" (and "r.TemporalAA.Upsampling", so TAA, and thus SR, outputs at full resolution).
-+      // The first preset leaves both to the game.
++      // The first preset leaves both to the game. XeSS has its own preset names and two more ratios, other SRs use FSR's (DLSS's ratios match them).
 +      struct RenderScalePreset
 +      {
-+         const char* name;
++         const char* fsr_name; // Null if FSR has no such preset
++         const char* xess_name;
 +         float screen_percentage;
 +      };
++      // Saved by index, so new presets go at the end, and "render_scale_preset_order" sorts them for the UI
 +      constexpr RenderScalePreset render_scale_presets[] = {
-+         {"Game Setting", 0.f},
-+         {"Native AA (100%)", 100.f},
-+         {"Quality (66.7%)", 100.f / 1.5f},
-+         {"Balanced (58.8%)", 100.f / 1.7f},
-+         {"Performance (50%)", 100.f / 2.f},
-+         {"Ultra Performance (33.3%)", 100.f / 3.f},
-+         {"Custom", 0.f},
++         {"Game Setting", "Game Setting", 0.f},
++         {"Native AA (100%)", "Native AA (100%)", 100.f},
++         {"Quality (66.7%)", "Ultra Quality (66.7%)", 100.f / 1.5f},
++         {"Balanced (58.8%)", "Quality (58.8%)", 100.f / 1.7f},
++         {"Performance (50%)", "Balanced (50%)", 100.f / 2.f},
++         {"Ultra Performance (33.3%)", "Ultra Performance (33.3%)", 100.f / 3.f},
++         {"Custom", "Custom", 0.f},
++         {nullptr, "Ultra Quality Plus (76.9%)", 100.f / 1.3f},
++         {nullptr, "Performance (43.5%)", 100.f / 2.3f},
 +      };
-+      constexpr int render_scale_preset_custom = std::size(render_scale_presets) - 1;
++      constexpr int render_scale_preset_custom = 6;
++      constexpr int render_scale_preset_order[] = {0, 1, 7, 2, 3, 4, 8, 5, 6};
++      static_assert(std::size(render_scale_preset_order) == std::size(render_scale_presets));
 +      int render_scale_preset = 0;
 +      float render_scale_custom = 75.f;
 +
@@ -215,7 +231,7 @@ index 9f285c74..0597264c 100644
        bool first_boot = true; // Automatic setting
        bool enable_hdr = true;
        bool next_enable_hdr = enable_hdr; // The value we serialize, that will be ignored until reboot
-@@ -67,8 +100,12 @@ namespace
+@@ -67,8 +106,12 @@ namespace
        return true;
     }
  
@@ -229,7 +245,7 @@ index 9f285c74..0597264c 100644
        if ((m.m20 == 0.0f && m.m21 == 0.0f) || std::fabs(m.m20) > max_jitter.x || std::fabs(m.m21) > max_jitter.y)
        {
           return false;
-@@ -76,7 +113,9 @@ namespace
+@@ -76,7 +119,9 @@ namespace
        return true;
     }
  
@@ -240,7 +256,7 @@ index 9f285c74..0597264c 100644
     {
        if (v.x > 32.0f && v.y > 32.0f &&
            v.z > 0.f && v.w > 0.f)
-@@ -86,7 +125,7 @@ namespace
+@@ -86,7 +131,7 @@ namespace
           if (std::fabs(v.z - inv_w) < FLT_EPSILON &&
               std::fabs(v.w - inv_h) < FLT_EPSILON)
           {
@@ -249,7 +265,7 @@ index 9f285c74..0597264c 100644
              {
                 return true;
              }
-@@ -295,6 +334,7 @@ public:
+@@ -295,6 +340,7 @@ public:
           reshade::register_event<reshade::addon_event::unmap_buffer_region>(UnrealEngine::OnUnmapBufferRegion);
        }
     }
@@ -257,7 +273,7 @@ index 9f285c74..0597264c 100644
     void OnInit(bool async) override
     {
        GetShaderDefineData(POST_PROCESS_SPACE_TYPE_HASH).SetDefaultValue('0');
-@@ -873,12 +913,18 @@ public:
+@@ -873,12 +919,18 @@ public:
              output_color_resource->QueryInterface(&output_color);
           // Only TAA passes of the same view can re-use the SR output, any other one runs natively
           if (!output_color.get() || !game_device_data.sr_drawn_output.get() || source_color.get() != game_device_data.sr_drawn_source.get())
@@ -276,7 +292,7 @@ index 9f285c74..0597264c 100644
           CopySROutput(native_device_context, output_color.get(), game_device_data.sr_drawn_output.get(), game_device_data.sr_drawn_size);
           return DrawOrDispatchOverrideType::Skip;
        }
-@@ -926,10 +972,15 @@ public:
+@@ -926,10 +978,15 @@ public:
           }
           const bool dlss_inputs_valid = shader_resources[taa_shader_info.source_texture_register].get() != nullptr && shader_resources[taa_shader_info.depth_texture_register].get() != nullptr && shader_resources[taa_shader_info.velocity_texture_register].get() != nullptr && (render_target_views[0].get() != nullptr || unordered_access_views[0].get() != nullptr);
           ASSERT_ONCE(dlss_inputs_valid);
@@ -292,7 +308,7 @@ index 9f285c74..0597264c 100644
              auto* sr_instance_data = device_data.GetSRInstanceData();
              ASSERT_ONCE(sr_instance_data);
  
-@@ -954,6 +1005,7 @@ public:
+@@ -954,6 +1011,7 @@ public:
                 // the view, whose size UE rounds to whole pixels, so the two aspect ratios only match approximately.
                 if (std::fabs(output_aspect_ratio / render_aspect_ratio - 1.f) > 0.01f)
                 {
@@ -300,7 +316,18 @@ index 9f285c74..0597264c 100644
                    device_data.force_reset_sr = true;
                    return DrawOrDispatchOverrideType::None;
                 }
-@@ -983,6 +1035,8 @@ public:
+@@ -973,7 +1031,9 @@ public:
+             settings_data.output_height = sr_output_size.y;
+             settings_data.render_width = game_device_data.render_resolution.x;
+             settings_data.render_height = game_device_data.render_resolution.y;
+-            settings_data.dynamic_resolution = true;
++            // A fixed render scale isn't dynamic. Flagging it as such would size FSR's resources for the output resolution, and make XeSS use its
++            // Ultra Performance preset whatever the scale. Any render resolution change re-creates the SR context regardless.
++            settings_data.dynamic_resolution = !render_scale_overridden;
+             settings_data.hdr = true; // Unreal Engine does DLSS before tonemapping, in HDR linear space
+             settings_data.inverted_depth = true;
+             settings_data.mvs_jittered = false;
+@@ -983,6 +1043,8 @@ public:
              settings_data.mvs_y_scale = 1.0f;
              const bool sr_output_supported = sr_output_size.x >= sr_instance_data->min_resolution && sr_output_size.y >= sr_instance_data->min_resolution;
              const bool sr_settings_updated = sr_output_supported && sr_implementations[device_data.sr_type]->UpdateSettings(sr_instance_data, native_device_context, settings_data);
@@ -309,7 +336,7 @@ index 9f285c74..0597264c 100644
  
              constexpr bool dlss_use_native_uav = true;
              bool dlss_output_supports_uav = dlss_use_native_uav && (taa_output_texture_desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS) != 0 && !sr_output_is_partial;
-@@ -1162,8 +1216,73 @@ public:
+@@ -1162,8 +1224,73 @@ public:
        return DrawOrDispatchOverrideType::None;
     }
  
@@ -383,7 +410,7 @@ index 9f285c74..0597264c 100644
        auto& game_device_data = GetGameDeviceData(device_data);
        game_device_data.found_per_view_globals = false;
        game_device_data.camera_cut = !device_data.taa_detected && !device_data.has_drawn_sr && !device_data.force_reset_sr;
-@@ -1345,6 +1464,45 @@ public:
+@@ -1345,6 +1472,54 @@ public:
  #if ENABLE_SR
        ImGui::NewLine();
  
@@ -391,12 +418,21 @@ index 9f285c74..0597264c 100644
 +         const bool render_scale_available = screen_percentage_cvar != nullptr;
 +         if (!render_scale_available)
 +            ImGui::BeginDisabled();
-+         if (ImGui::BeginCombo("Render Resolution", render_scale_presets[render_scale_preset].name))
++         const bool xess_names = device_data.sr_type == SR::Type::XeSS;
++         const auto preset_name = [xess_names](int i)
 +         {
-+            for (int i = 0; i < int(std::size(render_scale_presets)); i++)
++            return xess_names ? render_scale_presets[i].xess_name : render_scale_presets[i].fsr_name;
++         };
++         // A preset the selected SR doesn't have stays selected (e.g. after switching from XeSS) until another one is picked
++         const char* const selected_preset_name = preset_name(render_scale_preset) ? preset_name(render_scale_preset) : render_scale_presets[render_scale_preset].xess_name;
++         if (ImGui::BeginCombo("Render Resolution", selected_preset_name))
++         {
++            for (const int i : render_scale_preset_order)
 +            {
++               if (!preset_name(i))
++                  continue;
 +               const bool selected = i == render_scale_preset;
-+               if (ImGui::Selectable(render_scale_presets[i].name, selected))
++               if (ImGui::Selectable(preset_name(i), selected))
 +               {
 +                  render_scale_preset = i;
 +                  reshade::set_config_value(runtime, NAME, "RenderScalePreset", render_scale_preset);
@@ -429,18 +465,18 @@ index 9f285c74..0597264c 100644
        // TODO: render this below the SR selection
        // Disable the checkbox if SR is not enabled
        bool sr_enabled = device_data.sr_type != SR::Type::None;
-@@ -1390,6 +1548,10 @@ public:
+@@ -1390,6 +1565,10 @@ public:
        reshade::get_config_value(runtime, NAME, "HDRHighlightsHuePreservation", cb_luma_global_settings.GameSettings.HDRHighlightsHuePreservation);
        reshade::get_config_value(runtime, NAME, "HDRHighlightsChrominancePreservation", cb_luma_global_settings.GameSettings.HDRHighlightsChrominancePreservation);
        reshade::get_config_value(runtime, NAME, "HDRChrominance", cb_luma_global_settings.GameSettings.HDRChrominance);
 +      reshade::get_config_value(runtime, NAME, "RenderScalePreset", render_scale_preset);
 +      reshade::get_config_value(runtime, NAME, "RenderScaleCustom", render_scale_custom);
-+      render_scale_preset = std::clamp(render_scale_preset, 0, render_scale_preset_custom);
++      render_scale_preset = std::clamp(render_scale_preset, 0, int(std::size(render_scale_presets)) - 1);
 +      render_scale_custom = std::clamp(render_scale_custom, 25.f, 100.f);
     }
  
     static void OnMapBufferRegion(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** data)
-@@ -1456,6 +1618,17 @@ public:
+@@ -1456,6 +1635,17 @@ public:
           Matrix44F matrix_a;
           std::memcpy(&matrix_a, &float_data[global_cb_info.view_to_clip_start_index], sizeof(Matrix44F));
           bool is_global_cb = IsViewSizeInvSize(vsize_and_inv_size, device_data.render_resolution.x / device_data.render_resolution.y) && MatrixLikeProjection(matrix_a) && ProjectionHasJitter(matrix_a, {vsize_and_inv_size.z, vsize_and_inv_size.w});

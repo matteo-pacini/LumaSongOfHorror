@@ -8,7 +8,7 @@ Notes for coding agents working on this repository. User-facing documentation is
 A patched build of Luma Framework's generic Unreal Engine mod (a ReShade add-on) that makes FSR 4,
 FSR 3 and XeSS upscale in *Song of Horror* (Steam app 1096570, Unreal Engine 4.21.2, DirectX 11).
 Upstream only ran them as native-resolution anti-aliasing. Developed and tested only on Linux:
-Proton-CachyOS, RX 6800 XT, FSR 4 INT8, Steam build 8260563.
+Proton-CachyOS, RX 6800 XT, FSR 4 INT8, FSR 3, XeSS 2.0.2 (DX12 interop), Steam build 8260563.
 
 ## Layout
 
@@ -18,7 +18,10 @@ Proton-CachyOS, RX 6800 XT, FSR 4 INT8, Steam build 8260563.
 - `patches/0002`: pass UE's real render resolution to the upscaler, decode motion vectors with UVs
   relative to the scene textures' real size, relax the TAA output aspect check.
 - `patches/0003`: the "Render Resolution" setting (overrides `r.ScreenPercentage` and
-  `r.TemporalAA.Upsampling`), fixes for SR below ~71%, and Test-build diagnostics.
+  `r.TemporalAA.Upsampling`; presets named after the selected SR's, saved by index), SR set up
+  for a fixed rather than dynamic resolution while it overrides, fixes for SR below ~71%, and
+  Test-build diagnostics.
+- `patches/0004`: FSR 3 logs its contexts (and creation failures) to `ReShade.log`.
 - `flake.nix`, `cmake/`, `CMakeLists.txt`: Linux cross build (clang-cl, lld-link) replacing
   upstream's MSBuild project. DLSS/NGX is deliberately not built (NVIDIA's license requires
   branding a mod can't provide).
@@ -44,8 +47,8 @@ Finally detach back to `8f91e14` and run `scripts/apply-patches.sh`, so the subm
 on upstream.
 
 Test in game by reading `ReShade.log` next to the executable: `FSR4: Created context (render WxH,
-output WxH)` is logged whenever the upscaler is (re)created, so every render resolution change shows
-up. Test builds also log why a TAA pass skipped the upscaler. The game must be closed before
+output WxH)` (`FSR3: Created context`, `XeSS: Initialized the context`) is logged whenever the
+upscaler is (re)created, so every render resolution change shows up. Test builds also log why a TAA pass skipped the upscaler. The game must be closed before
 deploying or editing `Engine.ini` (the game rewrites it on exit, with CRLF line endings).
 
 ## History
@@ -72,6 +75,10 @@ deploying or editing `Engine.ini` (the game rewrites it on exit, with CRLF line 
    also switches to another TAA shader (`0xC828F120`) below ~71%.
 8. The README comparison was captured from inside the game by a temporary build that called ReShade's
    `save_screenshot()` when a trigger file appeared. That code was not committed either.
+9. v1.1.0: XeSS and FSR 3 were tested. XeSS always used its Ultra Performance preset, because the
+   UE mod flags the render resolution as dynamic; it now isn't while a preset overrides it. The
+   presets take XeSS's names when it's selected, plus its two extra ratios (76.9%, 43.5%), which
+   are hidden for FSR. FSR 3 logged nothing to `ReShade.log`, so patch 0004 adds that.
 
 ## Known issues
 
@@ -79,7 +86,9 @@ deploying or editing `Engine.ini` (the game rewrites it on exit, with CRLF line 
   never inspects the lower resolution TAA shader UE creates mid-session, so it isn't replaced until
   the game restarts. The cause in Luma's shader patching path (`Core/includes/patch.inl`,
   `PatchShaderSync`) hasn't been found yet.
-- Each preset change recreates the FSR context three times (UE applies the new view size a frame late).
+- Each preset change recreates the upscaler context three times (UE applies the new view size a frame late).
 - Only Steam build 8260563 is supported; the console variable lookup depends on its code.
-- Only FSR 4 (Luma's DX12 interop path, upgraded to INT8 by Proton-CachyOS) was tested. FSR 3 (native
-  DX11) and XeSS (DX12 interop on non-Intel GPUs) are compiled in but were never selected in game.
+- On the frame after a preset change, the view size and the TAA jitter don't match yet, so XeSS
+  rejects the jitter (`xessD3D12Execute failed, error = -4`, logged up to 10 times) and skips that
+  frame. FSR doesn't validate the jitter.
+- XeSS was only tested through DX12 interop (non-Intel GPU); its native DX11 path is Intel only.

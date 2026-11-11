@@ -1,7 +1,7 @@
 From 1b14793ef299f3fc04a3510a9105bbd4c3ed8dfb Mon Sep 17 00:00:00 2001
 From: Matteo Pacini <m+github@matteopacini.me>
 Date: Tue, 10 Nov 2026 21:45:24 +0000
-Subject: [PATCH 2/3] Unreal Engine: Upscale with SR when UE renders below the
+Subject: [PATCH 2/4] Unreal Engine: Upscale with SR when UE renders below the
  output resolution
 
 The mod always passed the swapchain size as the SR render resolution, so SR

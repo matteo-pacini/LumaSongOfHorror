@@ -1,0 +1,51 @@
+From 99848305d9ba943ceb4d5d6d0a3bbfded9a6f4c0 Mon Sep 17 00:00:00 2001
+From: Matteo Pacini <m+github@matteopacini.me>
+Date: Wed, 11 Nov 2026 08:45:19 +0000
+Subject: [PATCH 4/4] FSR 3: Log context creation and failures to ReShade's log
+
+FSR 3 only reported errors through printf_s, which doesn't reach any log
+from a ReShade add-on, so whether it ran couldn't be checked. Log the render
+and output resolution of each created context, like FSR 4 and XeSS do, and
+context creation failures as errors.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/Core/fsr/FSR.cpp | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/Source/Core/fsr/FSR.cpp b/Source/Core/fsr/FSR.cpp
+index af0a864f..e589222d 100644
+--- a/Source/Core/fsr/FSR.cpp
++++ b/Source/Core/fsr/FSR.cpp
+@@ -8,8 +8,11 @@
+ 
+ #include "../includes/debug.h"
+ 
++#include <include/reshade.hpp>
++
+ #include <cstring>
+ #include <cassert>
++#include <format>
+ #include <unordered_set>
+ #include <wrl/client.h>
+ #include <d3d11.h>
+@@ -253,7 +256,7 @@ namespace FidelityFX
+       if (err_code != FFX_OK)
+       {
+          // TODO: set FSR as non compatible if this failed with a "non compatible" or "dll missing" error? Or try again?
+-         printf_s("FSR3: ffxFsr3ContextCreate failed, error = %d\n", static_cast<int>(err_code));
++         reshade::log::message(reshade::log::level::error, std::format("FSR3: ffxFsr3ContextCreate failed (render {}x{}, output {}x{}), error = {}", settings_data.render_width, settings_data.render_height, settings_data.output_width, settings_data.output_height, static_cast<int>(err_code)).c_str());
+          ASSERT_ONCE_MSG(false, "Couldn't create FSR3 context");
+          free(scratch_buffer);
+          return false;
+@@ -265,6 +268,7 @@ namespace FidelityFX
+ 
+       custom_data->phase_count = ffxFsr3GetJitterPhaseCount(settings_data.render_width, settings_data.output_width);
+ 
++      reshade::log::message(reshade::log::level::info, std::format("FSR3: Created context (render {}x{}, output {}x{}{})", settings_data.render_width, settings_data.render_height, settings_data.output_width, settings_data.output_height, settings_data.dynamic_resolution ? ", dynamic resolution" : "").c_str());
+       return true;
+    }
+ 
+-- 
+2.56.0
+
