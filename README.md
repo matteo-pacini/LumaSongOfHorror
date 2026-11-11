@@ -33,7 +33,9 @@ the game rendered at full output resolution, so it could only be used as native 
 - accepts the slightly different aspect ratio and larger TAA jitter Unreal uses at those
   resolutions;
 - decodes motion vectors with texture coordinates based on the real size of Unreal's scene
-  textures, which are padded beyond the render resolution.
+  textures, which are padded beyond the render resolution;
+- adds a **Super Resolution Sharpness** setting for FSR 4 and FSR 3, which turns on their
+  sharpening pass (RCAS). Luma's FSR code supports it, but the Unreal Engine mod never enabled it.
 
 Two other patches make Luma build with clang-cl, and make FSR 3 log its render and output
 resolution like FSR 4 and XeSS do. The patches are in [`patches/`](patches); the
@@ -86,6 +88,7 @@ application, which a mod cannot provide.
 | Setting | Purpose |
 |---|---|
 | Render Resolution | **Game Setting** leaves the render resolution to the game's own option. The other presets override it, and the game's option has no effect. They are named after the selected upscaler's presets. With FSR: Native AA renders at 100% (the upscaler only replaces TAA), Quality at 66.7%, Balanced at 58.8%, Performance at 50% and Ultra Performance at 33.3%. With XeSS: Native AA at 100%, Ultra Quality Plus at 76.9%, Ultra Quality at 66.7%, Quality at 58.8%, Balanced at 50%, Performance at 43.5% and Ultra Performance at 33.3%. |
+| Super Resolution Sharpness | FSR 4 and FSR 3 only: the strength of their sharpening pass, from 0 (off) to 1, to counter the slight softness of upscaling. XeSS has no sharpening pass, so the slider is greyed out with it. |
 | `r.DefaultFeature.AntiAliasing=2`, `r.PostProcessAAQuality=4` | Forces Unreal's TAA on; Luma replaces that pass with the upscaler. |
 | `bSmoothFrameRate=False` | Removes the default 62 FPS cap. |
 | `PROTON_FSR4_UPGRADE=1` | Proton-CachyOS downloads AMD's FSR 4 driver component (`amdxcffx64.dll`) into the prefix. |

@@ -1,7 +1,7 @@
 From 85f9be50f19d43b752cb307f4efac43e3aa39038 Mon Sep 17 00:00:00 2001
 From: Matteo Pacini <m+github@matteopacini.me>
 Date: Tue, 10 Nov 2026 23:04:47 +0000
-Subject: [PATCH 3/4] Unreal Engine: Render resolution setting, and SR at lower
+Subject: [PATCH 3/5] Unreal Engine: Render resolution setting, and SR at lower
  render resolutions
 
 Add a "Render Resolution" setting with upscaler presets (Native AA, then

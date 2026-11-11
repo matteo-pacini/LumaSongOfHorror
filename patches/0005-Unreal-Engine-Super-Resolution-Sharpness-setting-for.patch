@@ -1,0 +1,69 @@
+From c35228f7101c3a11ed7ac5b71932d3a88a71b561 Mon Sep 17 00:00:00 2001
+From: Matteo Pacini <m+github@matteopacini.me>
+Date: Wed, 11 Nov 2026 10:51:16 +0000
+Subject: [PATCH 5/5] Unreal Engine: Super Resolution Sharpness setting for FSR
+
+FSR 3 and FSR 4 sharpen their output with RCAS when the draw data's
+user_sharpness is >= 0, but the Unreal Engine mod never set it, so it
+stayed disabled. A "Super Resolution Sharpness" slider (0 to 1, saved as
+SRSharpness) now sets it, with 0 leaving RCAS off. It's disabled for
+XeSS, which has no sharpening pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/Games/Unreal Engine/main.cpp | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/Source/Games/Unreal Engine/main.cpp b/Source/Games/Unreal Engine/main.cpp
+index fa14912e..92d7342a 100644
+--- a/Source/Games/Unreal Engine/main.cpp	
++++ b/Source/Games/Unreal Engine/main.cpp	
+@@ -30,6 +30,7 @@ namespace
+       bool enable_dithering_fix = false; // Master switch for dithering fix
+       bool sr_auto_exposure = true;
+       bool fsr_zero_velocity_factor = false; // FSR 3 only
++      float sr_sharpness = 0.f; // FSR's RCAS pass, off at 0. XeSS has no sharpening.
+ 
+       // Render resolution override, through UE's "r.ScreenPercentage" (and "r.TemporalAA.Upsampling", so TAA, and thus SR, outputs at full resolution).
+       // The first preset leaves both to the game. XeSS has its own preset names and two more ratios, other SRs use FSR's (DLSS's ratios match them).
+@@ -1178,6 +1179,7 @@ public:
+                draw_data.near_plane = game_device_data.near_plane / 100.0f;
+                draw_data.far_plane = FLT_MAX; // TODO: made up values
+                draw_data.vert_fov = game_device_data.fov_y;
++               draw_data.user_sharpness = sr_sharpness > 0.f ? sr_sharpness : -1.f;
+ 
+                bool dlss_succeeded = sr_implementations[device_data.sr_type]->Draw(sr_instance_data, native_device_context, draw_data);
+                draw_state_stack.Restore(native_device_context);
+@@ -1536,6 +1538,18 @@ public:
+          ImGui::SetTooltip("Enable Super Resolution (DLSS/FSR) to change this setting.");
+       }
+ 
++      {
++         const bool sr_has_sharpening = device_data.sr_type == SR::Type::FSR || device_data.sr_type == SR::Type::FSR_4;
++         if (!sr_has_sharpening)
++            ImGui::BeginDisabled();
++         if (ImGui::SliderFloat("Super Resolution Sharpness", &sr_sharpness, 0.f, 1.f, sr_sharpness > 0.f ? "%.2f" : "Off"))
++            reshade::set_config_value(runtime, NAME, "SRSharpness", sr_sharpness);
++         if (!sr_has_sharpening)
++            ImGui::EndDisabled();
++         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
++            ImGui::SetTooltip(sr_has_sharpening ? "Strength of FSR's sharpening (RCAS) of its output. 0 disables it." : "Only FSR has a sharpening pass.");
++      }
++
+       // FSR 4 doesn't use the velocity factor
+       if (device_data.sr_type == SR::Type::FSR)
+       {
+@@ -1567,8 +1581,10 @@ public:
+       reshade::get_config_value(runtime, NAME, "HDRChrominance", cb_luma_global_settings.GameSettings.HDRChrominance);
+       reshade::get_config_value(runtime, NAME, "RenderScalePreset", render_scale_preset);
+       reshade::get_config_value(runtime, NAME, "RenderScaleCustom", render_scale_custom);
++      reshade::get_config_value(runtime, NAME, "SRSharpness", sr_sharpness);
+       render_scale_preset = std::clamp(render_scale_preset, 0, int(std::size(render_scale_presets)) - 1);
+       render_scale_custom = std::clamp(render_scale_custom, 25.f, 100.f);
++      sr_sharpness = std::clamp(sr_sharpness, 0.f, 1.f);
+    }
+ 
+    static void OnMapBufferRegion(reshade::api::device* device, reshade::api::resource resource, uint64_t offset, uint64_t size, reshade::api::map_access access, void** data)
+-- 
+2.56.0
+

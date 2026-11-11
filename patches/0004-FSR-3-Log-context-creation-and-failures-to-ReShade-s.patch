@@ -1,7 +1,7 @@
 From 99848305d9ba943ceb4d5d6d0a3bbfded9a6f4c0 Mon Sep 17 00:00:00 2001
 From: Matteo Pacini <m+github@matteopacini.me>
 Date: Wed, 11 Nov 2026 08:45:19 +0000
-Subject: [PATCH 4/4] FSR 3: Log context creation and failures to ReShade's log
+Subject: [PATCH 4/5] FSR 3: Log context creation and failures to ReShade's log
 
 FSR 3 only reported errors through printf_s, which doesn't reach any log
 from a ReShade add-on, so whether it ran couldn't be checked. Log the render

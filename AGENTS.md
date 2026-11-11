@@ -22,6 +22,8 @@ Proton-CachyOS, RX 6800 XT, FSR 4 INT8, FSR 3, XeSS 2.0.2 (DX12 interop), Steam 
   for a fixed rather than dynamic resolution while it overrides, fixes for SR below ~71%, and
   Test-build diagnostics.
 - `patches/0004`: FSR 3 logs its contexts (and creation failures) to `ReShade.log`.
+- `patches/0005`: the "Super Resolution Sharpness" setting (saved as `SRSharpness`), passed to
+  FSR's RCAS through `DrawData::user_sharpness`; 0 leaves RCAS off.
 - `flake.nix`, `cmake/`, `CMakeLists.txt`: Linux cross build (clang-cl, lld-link) replacing
   upstream's MSBuild project. DLSS/NGX is deliberately not built (NVIDIA's license requires
   branding a mod can't provide).
@@ -79,6 +81,9 @@ deploying or editing `Engine.ini` (the game rewrites it on exit, with CRLF line 
    UE mod flags the render resolution as dynamic; it now isn't while a preset overrides it. The
    presets take XeSS's names when it's selected, plus its two extra ratios (76.9%, 43.5%), which
    are hidden for FSR. FSR 3 logged nothing to `ReShade.log`, so patch 0004 adds that.
+10. Upscaled frames looked slightly soft, even with FSR 4. Luma's FSR 3 and FSR 4 code already passes
+    `DrawData::user_sharpness` to FSR's RCAS pass, but the UE mod left it at -1 (off), so patch 0005
+    adds a slider for it. Tested in game with FSR 4 at 0.5; FSR 3's sharpening wasn't tried.
 
 ## Known issues
 
